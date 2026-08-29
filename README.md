@@ -136,7 +136,7 @@ sudo apt-get install cmake-curses-gui
 Some of the options:
 * `PFFFT_USE_TYPE_FLOAT` to activate single precision 'float' (default: ON)
 * `PFFFT_USE_TYPE_DOUBLE` to activate 'double' precision float (default: ON)
-* `PFFFT_USE_SIMD` to use SIMD (SSE/AVX/NEON/ALTIVEC) CPU features? (default: ON)
+* `PFFFT_USE_SIMD` to use SIMD (SSE/AVX/NEON/ALTIVEC/WASM SIMD) CPU features? (default: ON)
 * `DISABLE_SIMD_AVX` to disable AVX CPU features (default: OFF)
 * `PFFFT_USE_SIMD_NEON` to force using NEON on ARM (requires PFFFT_USE_SIMD) (default: OFF)
 * `PFFFT_USE_SCALAR_VECT` to use 4-element vector scalar operations (if no other SIMD) (default: ON)
@@ -169,10 +169,21 @@ ctest -C Release
 
 see [https://cmake.org/cmake/help/v3.15/manual/cmake-generators.7.html#visual-studio-generators](https://cmake.org/cmake/help/v3.15/manual/cmake-generators.7.html#visual-studio-generators)
 
+With [Emscripten](https://emscripten.org/) for WebAssembly (requires the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)):
+
+```sh
+mkdir build
+cd build
+emcmake cmake ..
+cmake --build .
+ctest
+```
+
+WASM SIMD is enabled automatically. Emscripten provides NEON-to-WASM SIMD translation via [SIMDe](https://github.com/simd-everywhere/simde) (SIMD Everywhere) compatibility headers, so pffft's NEON code paths are reused for WebAssembly.
 
 ## Using pffft in your CMake project
 
-pffft can be included as a dependency in your CMake project via `FetchContent` or `add_subdirectory()`. When used this way, tests, benchmarks, and examples are automatically disabled, so pffft won't pollute your build or ctest runner with unnecessary targets.
+pffft can be included as a dependency in your CMake project via `FetchContent` or `add_subdirectory()`. When used this way, tests, benchmarks, examples, and the standalone `uninstall` helper target are automatically disabled, so pffft won't pollute your build or ctest runner with unnecessary targets or cause target-name collisions.
 
 ### FetchContent (CMake 3.11+)
 
@@ -238,6 +249,12 @@ The main changes on top of the original include:
 * c++ headers (wrapper)
 * additional API helper functions
 * additional library for fast convolution
+* const-correct setup arguments for all transform functions
+* zero-phase convolution support for linear-phase FIR filters
+  (`pffft_zconvert_zp()` / `pffft_zconvolve_zp()`, see `pffft.h`);
+  with default scaling the forward transform -> zconvolve_zp ->
+  backward pipeline yields the circular convolution at unit gain
+* unscaled frequency-domain multiply `pffft_zconvolve()` and `pffft_zconvolve_scale()`
 * cmake support
 * ctest
 
@@ -445,4 +462,3 @@ an explanation of why the change was not ported.
 | 2025-02-12 | `0d7449a` | Dan Raviv | Fix MSVC `/fp:strict` C2099 errors | `4d1c78d` | cherry-picked |
 | 2025-12-19 | `c306b13` | Julien Pommier | Fix implicit double-to-float conversions | `31be131` | cherry-picked (fftpack.c portion) |
 | 2026-01-05 | `0979688` | Julien Pommier | Fix alignment for small `size_t` platforms | `a9786ad` | already uses `uintptr_t` |
-

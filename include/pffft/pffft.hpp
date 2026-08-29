@@ -57,16 +57,16 @@ template<typename T> struct Types {};
 #if defined(PFFFT_ENABLE_FLOAT) || ( !defined(PFFFT_ENABLE_FLOAT) && !defined(PFFFT_ENABLE_DOUBLE) )
 template<> struct Types<float>  {
   typedef float  Scalar;
-  typedef std::complex<Scalar> Complex;
+  typedef ::std::complex<Scalar> Complex;
   static int simd_size() { return detail::pffft_simd_size(); }
   static const char * simd_arch() { return detail::pffft_simd_arch(); }
   static int minFFtsize() { return pffft_min_fft_size(detail::PFFFT_REAL); }
   static bool isValidSize(int N) { return pffft_is_valid_size(N, detail::PFFFT_REAL); }
   static int nearestTransformSize(int N, bool higher) { return pffft_nearest_transform_size(N, detail::PFFFT_REAL, higher ? 1 : 0); }
 };
-template<> struct Types< std::complex<float> >  {
+template<> struct Types< ::std::complex<float> >  {
   typedef float  Scalar;
-  typedef std::complex<float>  Complex;
+  typedef ::std::complex<float>  Complex;
   static int simd_size() { return detail::pffft_simd_size(); }
   static const char * simd_arch() { return detail::pffft_simd_arch(); }
   static int minFFtsize() { return pffft_min_fft_size(detail::PFFFT_COMPLEX); }
@@ -77,16 +77,16 @@ template<> struct Types< std::complex<float> >  {
 #if defined(PFFFT_ENABLE_DOUBLE)
 template<> struct Types<double> {
   typedef double Scalar;
-  typedef std::complex<Scalar> Complex;
+  typedef ::std::complex<Scalar> Complex;
   static int simd_size() { return detail::pffftd_simd_size(); }
   static const char * simd_arch() { return detail::pffftd_simd_arch(); }
   static int minFFtsize() { return pffftd_min_fft_size(detail::PFFFT_REAL); }
   static bool isValidSize(int N) { return pffftd_is_valid_size(N, detail::PFFFT_REAL); }
   static int nearestTransformSize(int N, bool higher) { return pffftd_nearest_transform_size(N, detail::PFFFT_REAL, higher ? 1 : 0); }
 };
-template<> struct Types< std::complex<double> > {
+template<> struct Types< ::std::complex<double> > {
   typedef double Scalar;
-  typedef std::complex<double> Complex;
+  typedef ::std::complex<double> Complex;
   static int simd_size() { return detail::pffftd_simd_size(); }
   static const char * simd_arch() { return detail::pffftd_simd_arch(); }
   static int minFFtsize() { return pffftd_min_fft_size(detail::PFFFT_COMPLEX); }
@@ -106,15 +106,15 @@ namespace detail {
 
 // define AlignedVector<T> utilizing 'using' in C++11
 template<typename T>
-using AlignedVector = typename std::vector< T, PFAlloc<T> >;
+using AlignedVector = typename ::std::vector< T, PFAlloc<T> >;
 
 #else
 
-// define AlignedVector<T> having to derive std::vector<>
+// define AlignedVector<T> having to derive ::std::vector<>
 template <typename T>
-struct AlignedVector : public std::vector< T, PFAlloc<T> > {
-  AlignedVector() : std::vector< T, PFAlloc<T> >() { }
-  AlignedVector(int N) : std::vector< T, PFAlloc<T> >(N) { }
+struct AlignedVector : public ::std::vector< T, PFAlloc<T> > {
+  AlignedVector() : ::std::vector< T, PFAlloc<T> >() { }
+  AlignedVector(int N) : ::std::vector< T, PFAlloc<T> >(N) { }
 };
 
 #endif
@@ -336,6 +336,20 @@ public:
           AlignedVector<Scalar> & spectrum_internal_ab,
           const Scalar scaling );
 
+  // unscaled variant of the above
+  AlignedVector<Scalar> & convolve(
+          const AlignedVector<Scalar> & spectrum_internal_a,
+          const AlignedVector<Scalar> & spectrum_internal_b,
+          AlignedVector<Scalar> & spectrum_internal_ab );
+
+  int zconvertZP(const AlignedVector<Scalar> & spectrum_internal_in,
+                 AlignedVector<Scalar> & spectrum_internal_out,
+                 const Scalar scaling );
+
+  int convolveZP(const AlignedVector<Scalar> & spectrum_internal_x,
+                 const AlignedVector<Scalar> & spectrum_internal_hzp,
+                 AlignedVector<Scalar> & spectrum_internal_ab );
+
 
   ////////////////////////////////////////////
   ////
@@ -380,6 +394,25 @@ public:
                    const Scalar* spectrum_internal_b,
                    Scalar* spectrum_internal_ab,
                    const Scalar scaling);
+
+  // unscaled variant of the above: spectrum_internal_ab = a * b
+  Scalar* convolve(const Scalar* spectrum_internal_a,
+                   const Scalar* spectrum_internal_b,
+                   Scalar* spectrum_internal_ab);
+
+  // zero-phase helpers for REAL transforms; return 0 on success,
+  // nonzero for COMPLEX transforms. zconvertZP() normalizes by 1/N:
+  // with scaling == 1, transform(x, FORWARD) -> convolveZP() ->
+  // transform(.., BACKWARD) yields the circular convolution of x
+  // with the filter at unit gain. See pffft_zconvert_zp() /
+  // pffft_zconvolve_zp() for the layout contract.
+  int zconvertZP(const Scalar* spectrum_internal_in,
+                 Scalar* spectrum_internal_out,
+                 const Scalar scaling);
+
+  int convolveZP(const Scalar* spectrum_internal_x,
+                 const Scalar* spectrum_internal_hzp,
+                 Scalar* spectrum_internal_ab);
 
   Scalar* convolveAccumulate(const Scalar* spectrum_internal_a,
                              const Scalar* spectrum_internal_b,
@@ -486,18 +519,37 @@ public:
                 Scalar* dft_ab,
                 const Scalar scaling)
   {
-    pffft_zconvolve_no_accu(self, dft_a, dft_b, dft_ab, scaling);
+    pffft_zconvolve_scale(self, dft_a, dft_b, dft_ab, scaling);
+  }
+
+  void convolve(const Scalar* dft_a,
+                const Scalar* dft_b,
+                Scalar* dft_ab)
+  {
+    pffft_zconvolve(self, dft_a, dft_b, dft_ab);
+  }
+
+  int zconvertZP(const Scalar* in, Scalar* out, const Scalar scaling)
+  {
+    return pffft_zconvert_zp(self, in, out, scaling);
+  }
+
+  int convolveZP(const Scalar* dft_x,
+                 const Scalar* dft_hzp,
+                 Scalar* dft_ab)
+  {
+    return pffft_zconvolve_zp(self, dft_x, dft_hzp, dft_ab);
   }
 };
 
 
 template<>
-class Setup< std::complex<float> >
+class Setup< ::std::complex<float> >
 {
   PFFFT_Setup* self;
 
 public:
-  typedef std::complex<float> value_type;
+  typedef ::std::complex<float> value_type;
   typedef Types< value_type >::Scalar Scalar;
 
   Setup()
@@ -542,7 +594,26 @@ public:
                 Scalar* dft_ab,
                 const Scalar scaling)
   {
-    pffft_zconvolve_no_accu(self, dft_a, dft_b, dft_ab, scaling);
+    pffft_zconvolve_scale(self, dft_a, dft_b, dft_ab, scaling);
+  }
+
+  void convolve(const Scalar* dft_a,
+                const Scalar* dft_b,
+                Scalar* dft_ab)
+  {
+    pffft_zconvolve(self, dft_a, dft_b, dft_ab);
+  }
+
+  int zconvertZP(const Scalar* in, Scalar* out, const Scalar scaling)
+  {
+    return pffft_zconvert_zp(self, in, out, scaling);
+  }
+
+  int convolveZP(const Scalar* dft_x,
+                 const Scalar* dft_hzp,
+                 Scalar* dft_ab)
+  {
+    return pffft_zconvolve_zp(self, dft_x, dft_hzp, dft_ab);
   }
 };
 
@@ -613,17 +684,35 @@ public:
                 Scalar* dft_ab,
                 const Scalar scaling)
   {
-    pffftd_zconvolve_no_accu(self, dft_a, dft_b, dft_ab, scaling);
+    pffftd_zconvolve_scale(self, dft_a, dft_b, dft_ab, scaling);
+  }
+
+  void convolve(const Scalar* dft_a,
+                const Scalar* dft_b,
+                Scalar* dft_ab)
+  {
+    pffftd_zconvolve(self, dft_a, dft_b, dft_ab);
+  }
+  int zconvertZP(const Scalar* in, Scalar* out, const Scalar scaling)
+  {
+    return pffftd_zconvert_zp(self, in, out, scaling);
+  }
+
+  int convolveZP(const Scalar* dft_x,
+                 const Scalar* dft_hzp,
+                 Scalar* dft_ab)
+  {
+    return pffftd_zconvolve_zp(self, dft_x, dft_hzp, dft_ab);
   }
 };
 
 template<>
-class Setup< std::complex<double> >
+class Setup< ::std::complex<double> >
 {
   PFFFTD_Setup* self;
 
 public:
-  typedef std::complex<double> value_type;
+  typedef ::std::complex<double> value_type;
   typedef Types< value_type >::Scalar Scalar;
 
   Setup()
@@ -676,7 +765,25 @@ public:
                 Scalar* dft_ab,
                 const Scalar scaling)
   {
-    pffftd_zconvolve_no_accu(self, dft_a, dft_b, dft_ab, scaling);
+    pffftd_zconvolve_scale(self, dft_a, dft_b, dft_ab, scaling);
+  }
+
+  void convolve(const Scalar* dft_a,
+                const Scalar* dft_b,
+                Scalar* dft_ab)
+  {
+    pffftd_zconvolve(self, dft_a, dft_b, dft_ab);
+  }
+  int zconvertZP(const Scalar* in, Scalar* out, const Scalar scaling)
+  {
+    return pffftd_zconvert_zp(self, in, out, scaling);
+  }
+
+  int convolveZP(const Scalar* dft_x,
+                 const Scalar* dft_hzp,
+                 Scalar* dft_ab)
+  {
+    return pffftd_zconvolve_zp(self, dft_x, dft_hzp, dft_ab);
   }
 };
 
@@ -842,6 +949,41 @@ Fft<T>::convolve(
   return spectrum_internal_ab;
 }
 
+template<typename T>
+inline AlignedVector< typename Fft<T>::Scalar > &
+Fft<T>::convolve(
+    const AlignedVector<Scalar> & spectrum_internal_a,
+    const AlignedVector<Scalar> & spectrum_internal_b,
+    AlignedVector<Scalar> & spectrum_internal_ab )
+{
+  convolve( spectrum_internal_a.data(), spectrum_internal_b.data(),
+            spectrum_internal_ab.data() );
+  return spectrum_internal_ab;
+}
+
+template<typename T>
+inline int
+Fft<T>::zconvertZP(
+    const AlignedVector<Scalar> & spectrum_internal_in,
+    AlignedVector<Scalar> & spectrum_internal_out,
+    const Scalar scaling )
+{
+  return zconvertZP( spectrum_internal_in.data(),
+                     spectrum_internal_out.data(), scaling );
+}
+
+template<typename T>
+inline int
+Fft<T>::convolveZP(
+    const AlignedVector<Scalar> & spectrum_internal_x,
+    const AlignedVector<Scalar> & spectrum_internal_hzp,
+    AlignedVector<Scalar> & spectrum_internal_ab )
+{
+  return convolveZP( spectrum_internal_x.data(),
+                     spectrum_internal_hzp.data(),
+                     spectrum_internal_ab.data() );
+}
+
 
 template<typename T>
 inline typename Fft<T>::Complex *
@@ -924,6 +1066,37 @@ Fft<T>::convolve(const Scalar* dft_a,
 }
 
 template<typename T>
+inline typename pffft::Fft<T>::Scalar*
+Fft<T>::convolve(const Scalar* dft_a,
+                 const Scalar* dft_b,
+                 Scalar* dft_ab)
+{
+  assert(isValid());
+  setup.convolve(dft_a, dft_b, dft_ab);
+  return dft_ab;
+}
+
+template<typename T>
+inline int
+Fft<T>::zconvertZP(const Scalar* spectrum_internal_in,
+                   Scalar* spectrum_internal_out,
+                   const Scalar scaling)
+{
+  assert(isValid());
+  return setup.zconvertZP(spectrum_internal_in, spectrum_internal_out, scaling);
+}
+
+template<typename T>
+inline int
+Fft<T>::convolveZP(const Scalar* dft_x,
+                   const Scalar* dft_hzp,
+                   Scalar* dft_ab)
+{
+  assert(isValid());
+  return setup.convolveZP(dft_x, dft_hzp, dft_ab);
+}
+
+template<typename T>
 inline void
 Fft<T>::alignedFree(void* ptr)
 {
@@ -983,8 +1156,8 @@ class PFAlloc {
     typedef const T* const_pointer;
     typedef T&       reference;
     typedef const T& const_reference;
-    typedef std::size_t    size_type;
-    typedef std::ptrdiff_t difference_type;
+    typedef ::std::size_t    size_type;
+    typedef ::std::ptrdiff_t difference_type;
 
     // rebind allocator to type U
     template <class U>
@@ -1003,19 +1176,19 @@ class PFAlloc {
     /* constructors and destructor
      * - nothing to do because the allocator has no state
      */
-    PFAlloc() throw() {
+    PFAlloc() {
     }
-    PFAlloc(const PFAlloc&) throw() {
+    PFAlloc(const PFAlloc&) {
     }
     template <class U>
-      PFAlloc (const PFAlloc<U>&) throw() {
+      PFAlloc (const PFAlloc<U>&) {
     }
-    ~PFAlloc() throw() {
+    ~PFAlloc() {
     }
 
     // return maximum number of elements that can be allocated
-    size_type max_size () const throw() {
-        return std::numeric_limits<std::size_t>::max() / sizeof(T);
+    size_type max_size () const {
+        return ::std::numeric_limits< ::std::size_t>::max() / sizeof(T);
     }
 
     // allocate but don't initialize num elements of type T
@@ -1046,12 +1219,12 @@ class PFAlloc {
 // return that all specializations of this allocator are interchangeable
 template <class T1, class T2>
 bool operator== (const PFAlloc<T1>&,
-                 const PFAlloc<T2>&) throw() {
+                 const PFAlloc<T2>&) {
     return true;
 }
 template <class T1, class T2>
 bool operator!= (const PFAlloc<T1>&,
-                 const PFAlloc<T2>&) throw() {
+                 const PFAlloc<T2>&) {
     return false;
 }
 
