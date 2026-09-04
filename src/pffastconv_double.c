@@ -52,7 +52,6 @@ struct PFFASTCONVD_Setup
   double filterLen;   /* convolution length */
   int Nfft;        /* FFT/block length */
   int flags;
-  double scale;
 };
 
 
@@ -95,7 +94,6 @@ PFFASTCONVD_Setup * pffastconvd_new_setup( const double* filterCoeffs, int filte
     s->filterLen = 2 * filterLen - 1;
   s->Nfft = Nfft;  /* FFT/block length */
   s->flags = flags;
-  s->scale = (double)( 1.0 / Nfft );
 
   memset( s->Xt, 0, (unsigned)Nfft * sizeof(double) );
   if ( flags & PFFASTCONV_CORRELATION ) {
@@ -107,6 +105,17 @@ PFFASTCONVD_Setup * pffastconvd_new_setup( const double* filterCoeffs, int filte
   }
 
   pffftd_transform(s->st, s->Xt, s->Hf, /* tmp = */ s->Mf, PFFFT_FORWARD);
+
+  /* perform the 1/Nfft normalization of the inverse transform in the
+     filter spectrum, so that the per-block frequency-domain
+     multiply below needs no scaling at all. this is exact, because Nfft
+     comes from pffft_next_power_of_two() and scaling by a power of two
+     commutes with rounding: (X*H)*scale == X*(H*scale). */
+  {
+    const double scale = 1.0 / Nfft;
+    for ( i = 0; i < Nfft; ++i )
+      s->Hf[i] *= scale;
+  }
 
 #if FASTCONV_DBG_OUT
   printf("\n  fastConvSetup(filterLen = %d, blockLen %d) --> blockLen %d, OutLen = %d\n"
