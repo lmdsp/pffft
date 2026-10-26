@@ -48,6 +48,10 @@ if (PFFFT_USE_TYPE_DOUBLE)
   target_compile_definitions(test_pffft_cpp PRIVATE PFFFT_ENABLE_DOUBLE)
 endif()
 target_link_libraries( test_pffft_cpp  PFFFT ${STDCXXLIB} ${ASANLIB} )
+if (EMSCRIPTEN)
+  # the large-size tests overflow Emscripten's default 64 KB stack
+  target_link_options(test_pffft_cpp PRIVATE "-sSTACK_SIZE=1MB")
+endif()
 
 ######################################################
 
@@ -60,6 +64,10 @@ if (PFFFT_USE_TYPE_DOUBLE)
   target_compile_definitions(test_pffft_cpp_11 PRIVATE PFFFT_ENABLE_DOUBLE)
 endif()
 target_link_libraries( test_pffft_cpp_11  PFFFT ${STDCXXLIB} ${ASANLIB} )
+if (EMSCRIPTEN)
+  # the large-size tests overflow Emscripten's default 64 KB stack
+  target_link_options(test_pffft_cpp_11 PRIVATE "-sSTACK_SIZE=1MB")
+endif()
 
 set_property(TARGET test_pffft_cpp_11 PROPERTY CXX_STANDARD 11)
 set_property(TARGET test_pffft_cpp_11 PROPERTY CXX_STANDARD_REQUIRED ON)
@@ -92,11 +100,20 @@ if (PFFFT_USE_TYPE_FLOAT)
     COMMAND test_pffft_float
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
+  # self-test of the SIMD macros; passes trivially when SIMD is compiled out
+  add_test(NAME test_simd_float
+    COMMAND test_pffft_float --test-simd
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
 endif()
 
 if (PFFFT_USE_TYPE_DOUBLE)
   add_test(NAME test_pffft_double
     COMMAND test_pffft_double
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  add_test(NAME test_simd_double
+    COMMAND test_pffft_double --test-simd
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 endif()
