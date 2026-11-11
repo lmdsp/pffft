@@ -67,19 +67,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 
+#include "simd/pf_fma_x86.h" /* PFFFT_X86_HAVE_SSE, PFFFT_X86_HAVE_FMA */
+
 #ifndef PFFFT_SIMD_DISABLE
-#if (defined(__x86_64__) || defined(_M_X64) || defined(i386) || defined(_M_IX86))
-  #pragma message("Manual SSE x86/x64 optimizations are ON")
+#if defined(PFFFT_X86_HAVE_SSE)
   #include <xmmintrin.h>
   #define HAVE_SSE_INTRINSICS 1
   
-#elif defined(PFFFT_ENABLE_NEON) && defined(__arm__)
-  #pragma message "Manual NEON (arm32) optimizations are ON"
-  #include "sse2neon.h"
-  #define HAVE_SSE_INTRINSICS 1
-  
-#elif defined(PFFFT_ENABLE_NEON) && defined(__aarch64__)
-  #pragma message "Manual NEON (aarch64) optimizations are ON"
+#elif defined(__ARM_NEON)
   #include "sse2neon.h"
   #define HAVE_SSE_INTRINSICS 1
 
@@ -106,7 +101,6 @@ typedef union v4_union {
    maps onto vfmaq_f32; it has no _mm_fnmadd_ps, so VMSUB stays portable there.
    Everything else falls back to a separate multiply and add, exactly what
    these call sites spelled out before. */
-#include "simd/pf_fma_x86.h"
 #ifdef PFFFT_X86_HAVE_FMA
 #  include <immintrin.h>
 #  define VMADD(a,b,c)            _mm_fmadd_ps(a,b,c)

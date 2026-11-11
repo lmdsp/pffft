@@ -1,176 +1,184 @@
 
 ---
 
-# PFFFT: a pretty fast FFT and fast convolution with PFFASTCONV
+# PFFFT: A Pretty Fast FFT
 
 ---
 
 <!-- toc -->
 
-- [Brief Description](#brief-description)
-- [Why does it exist?](#why-does-it-exist)
+- [Brief description](#brief-description)
+- [Origin and design](#origin-and-design)
+- [The code](#the-code)
 - [CMake](#cmake)
-- [Performance and architecture notes](#performance-and-architecture-notes)
 - [Using pffft in your CMake project](#using-pffft-in-your-cmake-project)
-- [History / Origin / Changes](#history--origin--changes)
-- [Comparison with other FFTs](#comparison-with-other-ffts)
-- [Dependencies / Required Linux packages](#dependencies--required-linux-packages)
-- [Benchmarks and results](#benchmarks-and-results)
+- [Performance and architecture notes](#performance-and-architecture-notes)
+- [Benchmarks](#benchmarks)
+- [History and changes](#history-and-changes)
 - [Appendix: upstream commit map](#appendix-upstream-commit-map)
 
 <!-- tocstop -->
 
 ---
 
-## Brief description:
+## Brief description
 
-PFFFT does 1D Fast Fourier Transforms, of single precision real and
-complex vectors. It tries do it fast, it tries to be correct, and it
-tries to be small. Computations do take advantage of SSE1/AVX/AVX2 instructions
-on x86 cpus, Altivec on powerpc cpus, NEON on ARM cpus
-(including Apple Silicon), WASM SIMD on WebAssembly, and the RVV 1.0 vector
-extension on RISC-V cpus. The license is BSD-like.
+PFFFT does 1D Fast Fourier Transforms, of single and double precision real
+and complex vectors. It is fast, correct, and small. The license is BSD-like.
 
-PFFFT is a fork of [Julien Pommier's library on bitbucket](https://bitbucket.org/jpommier/pffft/)
-with some changes and additions.
+PFFFT was written by Julien Pommier; his original library is hosted on
+[Bitbucket](https://bitbucket.org/jpommier/pffft/). This fork adds
+double precision, further SIMD backends, a C++ wrapper, CMake support,
+fast convolution, and a few DSP functions. Changes made to the original since
+the fork have been cherry-picked where applicable, see the
+[upstream commit map](#appendix-upstream-commit-map).
+
+It supports these platforms and SIMD instruction sets:
+
+- **x86 and x86-64** (PCs, Intel Macs, servers): SSE for float; SSE2, or AVX
+  with `-mavx`, for double. Fused multiply-add with FMA3, e.g. via
+  `-march=haswell` or `/arch:AVX2`.
+- **64-bit ARM** (Apple Silicon Macs, iPhone and iPad, Android arm64-v8a,
+  Raspberry Pi 3 and later with a 64-bit OS, ARM servers): NEON for float and
+  double, with fused multiply-add.
+- **32-bit ARM** (Android armeabi-v7a, Raspberry Pi 2 and later with a 32-bit
+  OS): NEON for float, with fused multiply-add on VFPv4; double runs the scalar
+  code.
+- **WebAssembly** (browsers, Node.js, WASI): WASM SIMD for float and double,
+  optionally with Relaxed SIMD multiply-add.
+- **RISC-V** with the vector extension: RVV 1.0 for float and double.
+- **PowerPC**: AltiVec for float; double runs the scalar code.
+- **ARM Cortex-M microcontrollers**: scalar code; an experimental, opt-in
+  Helium backend for float on Cortex-M55 and Cortex-M85.
+
+On any other platform with a C99 compiler, e.g. ESP32 microcontrollers, it runs
+portable scalar code. On ESP32, Espressif's
+[ESP-DSP](https://github.com/espressif/esp-dsp) is likely faster, as it is
+optimized for those chips.
+
+CI runs the tests on Linux and Windows (MSVC and MinGW) on x86-64, on macOS on
+64-bit ARM, on WebAssembly, and under emulation on RISC-V and Cortex-M55.
+
+PFFASTCONV does fast convolution (FIR filtering), of single precision
+real vectors, utilizing the PFFFT library.
+
+PFDSP contains a few other signal processing functions: mixers, carrier
+generation, and a CIC filter.
 
 
-PFFASTCONV does fast convolution (FIR filtering), of single precision 
-real vectors, utilizing the PFFFT library. The license is BSD-like.
+## Origin and design
 
-PFDSP contains a few other signal processing functions.
-Currently, mixing and carrier generation functions are contained.
-It is work in progress - also the API!
-The fast convolution from PFFASTCONV might get merged into PFDSP.
+PFFFT started from the venerable FFTPACK v4, which is available on NETLIB.
+FFTPACK v4 was written in 1985, by Dr Paul Swarztrauber of NCAR. It performs
+well, but it is not competitive with the fastest FFT libraries, which take
+advantage of SIMD instructions.
 
-
-## Why does it exist:
-
-I (Julien Pommier) was in search of a good performing FFT library ,
-preferably very small and with a very liberal license.
-
-When one says "fft library", FFTW ("Fastest Fourier Transform in the
-West") is probably the first name that comes to mind -- I guess that
-99% of open-source projects that need a FFT do use FFTW, and are happy
-with it. However, it is quite a large library , which does everything
-fft related (2d transforms, 3d transforms, other transformations such
-as discrete cosine , or fast hartley). And it is licensed under the
-GNU GPL , which means that it cannot be used in non open-source
-products.
-
-An alternative to FFTW that is really small, is the venerable FFTPACK
-v4, which is available on NETLIB. A more recent version (v5) exists,
-but it is larger as it deals with multi-dimensional transforms. This
-is a library that is written in FORTRAN 77, a language that is now
-considered as a bit antiquated by many. FFTPACKv4 was written in 1985,
-by Dr Paul Swarztrauber of NCAR, more than 25 years ago ! And despite
-its age, benchmarks show it that it still a very good performing FFT
-library, see for example the 1d single precision benchmarks
-[here](http://www.fftw.org/speed/opteron-2.2GHz-32bit/). It is however not
-competitive with the fastest ones, such as FFTW, Intel MKL, AMD ACML,
-Apple vDSP. The reason for that is that those libraries do take
-advantage of the SSE SIMD instructions available on Intel CPUs,
-available since the days of the Pentium III. These instructions deal
-with small vectors of 4 floats at a time, instead of a single float
-for a traditionnal FPU, so when using these instructions one may expect
-a 4-fold performance improvement.
-
-The idea was to take this fortran fftpack v4 code, translate to C,
-modify it to deal with those SSE instructions, and check that the
+The idea was to take this Fortran FFTPACK v4 code, translate it to C,
+modify it to use SSE instructions, and check that the
 final performance is not completely ridiculous when compared to other
 SIMD FFT libraries. Translation to C was performed with [f2c](
 http://www.netlib.org/f2c/). The resulting file was a bit edited in
 order to remove the thousands of gotos that were introduced by
-f2c. You will find the fftpack.h and fftpack.c sources in the
-repository, this a complete translation of [fftpack](
+f2c. The result is in `src/fftpack.h` and `src/fftpack.c`: a complete
+translation of [FFTPACK](
 http://www.netlib.org/fftpack/), with the discrete cosine transform
 and the test program. There is no license information in the netlib
-repository, but it was confirmed to me by the fftpack v5 curators that
-the [same terms do apply to fftpack v4]
-(http://www.cisl.ucar.edu/css/software/fftpack5/ftpk.html). This is a
-"BSD-like" license, it is compatible with proprietary projects.
+repository, but the FFTPACK v5 curators confirmed to Julien Pommier that
+the [same terms do apply to FFTPACK v4](
+http://www.cisl.ucar.edu/css/software/fftpack5/ftpk.html). This is a
+"BSD-like" license; it is compatible with proprietary projects.
 
-Adapting fftpack to deal with the SIMD 4-element vectors instead of
-scalar single precision numbers was more complex than I originally
-thought, especially with the real transforms, and I ended up writing
-more code than I planned..
+The idea was not to break speed records, but to get a decently fast
+FFT that is at least 50% as fast as the fastest FFT -- especially on
+slow computers.
 
+PFFFT can be used in a real-time context as the FFT functions do not
+perform any memory allocation -- that is why they accept a 'work'
+array in their arguments.
 
-## The code:
+PFFFT also supports fast 1D convolution: it provides "unordered" FFTs, which
+skip reordering the output (see `pffft_transform()` vs.
+`pffft_transform_ordered()`), and a Fourier-domain convolution operation.
 
-### Good old C:
-The FFT API is very very simple, just make sure that you read the comments in `pffft.h`.
-
-The Fast convolution's API is also very simple, just make sure that you read the comments 
-in `pffastconv.h`.
-
-### C++:
-A simple C++ wrapper is available in `pffft.hpp`.
-
-### Git:
-This archive's source can be downloaded with git (without the submodules):
-```
-git clone https://github.com/marton78/pffft.git
-```
-
-### Only two files?:
-_"Only two files, in good old C, pffft.c and pffft.h"_
-
-This statement does **NO LONGER** hold!
-
-With new functionality and support for AVX, there was need to restructure the sources.
-But you can compile and link **pffft** as a static library.
+[README.pommier.md](README.pommier.md) tells the full story, in his words.
 
 
-## CMake:
-There's now CMake support to build the static libraries `libPFFFT.a`
-and `libPFFASTCONV.a` from the source files. The additional
-`libFFTPACK.a` library is built only when tests or benchmarks are enabled.
+## The code
+
+The FFT API is very very simple, just make sure that you read the comments in
+`include/pffft/pffft.h` (float) and `include/pffft/pffft_double.h` (double).
+A simple C++ wrapper is available in `include/pffft/pffft.hpp`; see
+`examples/` for C and C++ examples.
+
+Transform lengths must be of the form N = 2^a * 3^b * 5^c, and a multiple
+of 32 for real or 16 for complex transforms (unless both `PFFFT_USE_SIMD`
+and `PFFFT_USE_SCALAR_VECT` are off).
+`pffft_nearest_transform_size()` finds the nearest valid length.
+
+The PFFASTCONV API is also very simple, just make sure that you read the comments
+in `include/pffft/pffastconv.h`.
+
+
+## CMake
+
+CMake builds the libraries `PFFFT`, `PFFASTCONV` and `PFDSP` (files
+`libpffft`, `libpffastconv` and `libpfdsp`), static unless `BUILD_SHARED_LIBS`
+is set. PFFASTCONV and PFDSP need `PFFFT_USE_TYPE_FLOAT`. The FFTPACK
+libraries, used for validation, are built only when tests or benchmarks are
+enabled and `PFFFT_USE_FFTPACK` is on.
+On Debian/Ubuntu Linux, `sudo apt-get install build-essential cmake` is all
+you need.
 
 There are several CMake options to modify library size and optimization.
-You can explore all available options with `cmake-gui` or `ccmake`,
-the console version - after having installed (on Debian/Ubuntu Linux) one of
-```
-sudo apt-get install cmake-qt-gui
-sudo apt-get install cmake-curses-gui
-```
+You can explore all available options with `cmake-gui` or `ccmake`.
 
 Some of the options:
 * `PFFFT_USE_TYPE_FLOAT` to activate single precision 'float' (default: ON)
 * `PFFFT_USE_TYPE_DOUBLE` to activate 'double' precision float (default: ON)
-* `PFFFT_USE_SIMD` to use SIMD (SSE/AVX/NEON/ALTIVEC/WASM SIMD/RVV) CPU features? (default: ON)
-* `DISABLE_SIMD_AVX` to disable AVX CPU features (default: OFF)
-* `PFFFT_USE_SIMD_NEON` to force using NEON on ARM (requires PFFFT_USE_SIMD) (default: OFF)
-* `PFFFT_USE_SCALAR_VECT` to use 4-element vector scalar operations (if no other SIMD) (default: ON)
+* `PFFFT_USE_SIMD` to use SIMD (SSE/AVX/NEON/ALTIVEC/WASM SIMD/RVV) CPU features (default: ON)
+* `PFFFT_USE_SCALAR_VECT` to emulate 4-wide vectors in scalar code when no SIMD is available (default: ON)
 * `PFFFT_USE_WASM_RELAXED_SIMD` to use WebAssembly Relaxed SIMD multiply-add instructions, which may be fused when supported by the runtime (default: OFF)
+* `PFFFT_USE_HELIUM` to use the experimental ARM Helium (MVE) backend (default: OFF)
+* `INSTALL_PFFFT`, `INSTALL_PFFASTCONV`, `INSTALL_PFDSP` to install the
+  respective library (default: ON, OFF, OFF)
+* `TARGET_C_ARCH` / `TARGET_CXX_ARCH` to set the target architecture: a
+  `-march` value for gcc/clang (e.g. `haswell`, `armv7-a`, `rv64gcv`, or
+  `native`) or an `/arch` value for MSVC (e.g. `AVX2`)
+* `TARGET_C_EXTRA` / `TARGET_CXX_EXTRA` to add a preset of gcc/clang options,
+  e.g. `neon_vfpv4` or `neon_rpi4_a72` (32-bit ARM NEON), or `apple_m1`
+
+The SIMD backend follows the compiler's target flags: NEON is used whenever
+the compiler enables it (by default on AArch64 and on Android's armeabi-v7a;
+on other 32-bit ARM targets e.g. with `-mfpu=neon`, or one of the
+`TARGET_C_EXTRA=neon_*` presets), WASM SIMD with `-msimd128`, and RVV with a
+`-march` that includes `v`. pffft builds with the toolchain's target flags.
+On WebAssembly it adds `-msimd128` (and `-mrelaxed-simd` with
+`PFFFT_USE_WASM_RELAXED_SIMD`), on RISC-V the `-march` described below unless
+`TARGET_C_ARCH` is set; otherwise a SIMD instruction set is enabled with the
+compiler's own flags, e.g. through `TARGET_C_ARCH` / `TARGET_C_EXTRA`. `cmake`
+prints the backend it detected.
 
 Options can be passed to `cmake` at command line, e.g.
 ```
 cmake -DPFFFT_USE_TYPE_FLOAT=OFF -DPFFFT_USE_TYPE_DOUBLE=ON
 ```
 
-My Linux distribution defaults to GCC. With installed CLANG and the bash shell, you can use it with
+A typical build, here with clang instead of the default compiler:
 ```
 mkdir build
 cd build
-CC=/usr/bin/clang CXX=/usr/bin/clang++ cmake -DCMAKE_BUILD_TYPE=Debug ../
-cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=~ ../
-ccmake .                          # or: cmake-gui .
+CC=clang CXX=clang++ cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~ ..
 cmake --build .                   # or simply: make
 ctest                             # to execute some tests - including benchmarks
 cmake --build . --target install  # or simply: [sudo] make install
 ```
 
-With MSVC on Windows, you need some different options. Following ones to build a 64-bit Release with Visual Studio 2019:
+With MSVC on Windows, the build type is chosen at build time:
 ```
-mkdir build
-cd build
-cmake -G "Visual Studio 16 2019" -A x64 ..
-cmake --build . --config Release
-ctest -C Release
+cmake -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release
 ```
-
-see [https://cmake.org/cmake/help/v3.15/manual/cmake-generators.7.html#visual-studio-generators](https://cmake.org/cmake/help/v3.15/manual/cmake-generators.7.html#visual-studio-generators)
 
 With [Emscripten](https://emscripten.org/) for WebAssembly (requires the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)):
 
@@ -182,9 +190,77 @@ cmake --build .
 ctest
 ```
 
-WASM SIMD is enabled automatically when building with Emscripten; see
+With [WASI-SDK](https://github.com/WebAssembly/wasi-sdk), or any other clang
+toolchain targeting `wasm32`/`wasm64`:
+
+```sh
+cmake -S . -B build \
+  -DCMAKE_TOOLCHAIN_FILE=$WASI_SDK_PATH/share/cmake/wasi-sdk.cmake \
+  -DWASI_SDK_PREFIX=$WASI_SDK_PATH \
+  -DPFFFT_BUILD_TESTS=OFF -DPFFFT_BUILD_BENCHMARKS=OFF -DPFFFT_BUILD_EXAMPLES=OFF
+cmake --build build
+```
+
+The tests, benchmarks, and examples don't build out of the box under WASI.
+They call `clock()`, which needs `-D_WASI_EMULATED_PROCESS_CLOCKS` in the C
+flags and `-lwasi-emulated-process-clocks` in the linker flags. The C++
+tests also use exceptions, which WASI-SDK doesn't support by default. With the
+clock flags and `-DCMAKE_CROSSCOMPILING_EMULATOR=wasmtime`, the C tests build
+and pass under [wasmtime](https://wasmtime.dev/).
+
+WASM SIMD is enabled automatically for any WebAssembly target: Emscripten,
+WASI-SDK, or plain clang with `CMAKE_SYSTEM_PROCESSOR` set to `wasm32` or
+`wasm64`. See
 [Performance and architecture notes](#performance-and-architecture-notes) for
 the Relaxed SIMD option and the non-CMake build flags.
+
+## Using pffft in your CMake project
+
+pffft can be included as a dependency in your CMake project via `FetchContent` or `add_subdirectory()`. When used this way, tests, benchmarks, examples, and the standalone `uninstall` helper target are off by default, so pffft won't pollute your build or ctest runner with unnecessary targets or cause target-name collisions.
+
+### FetchContent (CMake 3.14+)
+
+```cmake
+include(FetchContent)
+
+FetchContent_Declare(pffft
+    GIT_REPOSITORY https://github.com/marton78/pffft.git
+    GIT_TAG master
+)
+FetchContent_MakeAvailable(pffft)
+
+target_link_libraries(my_app PRIVATE PFFFT::PFFFT)
+```
+
+### add_subdirectory
+
+If you have pffft checked out as a subdirectory or git submodule:
+
+```cmake
+add_subdirectory(pffft)
+
+target_link_libraries(my_app PRIVATE PFFFT::PFFFT)
+```
+
+### Available targets
+
+| Target | Description |
+|---|---|
+| `PFFFT::PFFFT` (or `PFFFT`) | FFT library (float and/or double, depending on options) |
+| `PFFASTCONV` | Fast convolution library |
+| `PFDSP` | DSP utilities (mixer, carrier generation, CIC filter) |
+
+### Build control options
+
+When pffft is the top-level project, these default to `ON`. When included as a subdirectory, they default to `OFF`:
+
+* `PFFFT_BUILD_TESTS` — Build test executables and register CTest tests. These
+  include `test_simd_float`/`test_simd_double`, which run the SIMD backend's
+  self-test (`test_pffft_float --test-simd`); they pass trivially when SIMD is
+  compiled out
+* `PFFFT_BUILD_BENCHMARKS` — Build benchmark executables
+* `PFFFT_BUILD_EXAMPLES` — Build example programs
+
 
 ## Performance and architecture notes
 
@@ -194,14 +270,14 @@ of pffft.
 ### x86: enable FMA
 
 On x86 the fused multiply-add paths are **opt-in**, and the default build does
-not get them. `VMADD`/`VMSUB` -- used by the complex multiply at the heart of
-`pffft_zconvolve*()` and of every radix codelet -- lower to a real FMA
-instruction only when the compiler guarantees FMA3:
+not get them. The complex multiply at the heart of `pffft_zconvolve*()` and of
+every radix pass uses pffft's multiply-add macros `VMADD`/`VMSUB`. They compile
+to a real FMA instruction only when the compiler guarantees FMA3:
 
 | compiler | how to enable |
 | --- | --- |
-| gcc / clang | `-DTARGET_C_ARCH=haswell` (or a later `-march` value) |
-| MSVC | `-DTARGET_C_ARCH=AVX2` |
+| gcc / clang | `-DTARGET_C_ARCH=haswell` (or a later `-march` value), likewise `TARGET_CXX_ARCH` |
+| MSVC | `-DTARGET_C_ARCH=AVX2`, likewise `TARGET_CXX_ARCH` |
 
 Without it, each fused operation costs a separate multiply plus add. Measured
 on the `pffft_zconvolve_accumulate()` inner loop, identical for gcc 12 and
@@ -222,8 +298,8 @@ separate multiply and add round twice.
 ### ARMv7 (32-bit ARM): prefer clang over gcc
 
 On 32-bit ARM, **gcc emits very inefficient assembly**, with a lot more
-operations that clang does. Measured over the whole float translation unit,
-both at `-O3 -march=armv7-a -mfpu=neon`:
+operations than clang does. Counts of vector load/store instructions over the
+whole float translation unit, both at `-O3 -march=armv7-a -mfpu=neon`:
 
 | | 64-bit `vldr`/`vstr` | 128-bit `vld1`/`vst1` |
 | --- | --- | --- |
@@ -259,15 +335,14 @@ intrinsics for both float and double precision.
 >
 > This uses relaxed multiply-add instructions, which the runtime may fuse into a single-rounding FMA, or fall back to a two-rounding multiply followed by add/subtract. It is **off by default** because relaxed SIMD results are not guaranteed bit-identical across engines or hardware (unlike the default WASM SIMD path); enable it only if your application tolerates ULP-level differences between runtimes.
 
-If you build for Emscripten without the bundled CMake config (e.g. a raw
-`emcc`/Makefile/Bazel invocation), compile with `-msimd128 -DPFFFT_ENABLE_WASM=1`
-to select the WASM SIMD backend; the previous `PFFFT_ENABLE_NEON` recipe no
-longer enables it and now silently falls back to scalar code.
+If you build for WebAssembly without the bundled CMake config (e.g. a raw
+`emcc`/`clang`/Makefile/Bazel invocation), compile with `-msimd128` to select
+the WASM SIMD backend.
 
 ### RISC-V: RVV vector backend
 
 When the target is detected as `riscv64`, the build defaults to
-`-march=rv64gcv` and defines `PFFFT_ENABLE_RVV`, enabling the
+`-march=rv64gcv` (the `v` is the vector extension, V), enabling the
 RVV 1.0 vector backend in `src/simd/pf_rvv_{float,double}.h`. On
 hardware with `VLEN >= 256` (e.g. Spacemit X100) the configure step
 also probes the host VLEN and appends a `zvlNNNb` suffix so the
@@ -278,156 +353,57 @@ both `-DTARGET_C_ARCH=rv64gc` and `-DTARGET_CXX_ARCH=rv64gc`.
 
 When cross-compiling, the probe runs under `CMAKE_CROSSCOMPILING_EMULATOR`;
 with QEMU, enable V and pick the VLEN explicitly, e.g.
-`-DCMAKE_CROSSCOMPILING_EMULATOR="qemu-riscv64-static;-L;/usr/riscv64-linux-gnu;-cpu;rv64,v=true,vlen=256"`.
-Without an emulator the build assumes V is present.
+`-DCMAKE_CROSSCOMPILING_EMULATOR="qemu-riscv64-static;-L;/usr/riscv64-linux-gnu;-cpu;rv64,v=true,vlen=256,vext_spec=v1.0"`.
+Distributions that build their riscv64 libraries for the RVA23 profile (e.g.
+Ubuntu 26.04) need an RVA23 CPU model to run the probe, e.g.
+`-cpu;rva23u64,vlen=256`. Use `qemu-riscv64` from the `qemu-user` package
+there, which no longer ships a `-static` binary. Without an emulator the build assumes V is present.
 
-## Using pffft in your CMake project
+### PowerPC: AltiVec backend
 
-pffft can be included as a dependency in your CMake project via `FetchContent` or `add_subdirectory()`. When used this way, tests, benchmarks, examples, and the standalone `uninstall` helper target are automatically disabled, so pffft won't pollute your build or ctest runner with unnecessary targets or cause target-name collisions.
+The AltiVec backend (`src/simd/pf_altivec_float.h`) is **float only**: there
+is no AltiVec double-precision backend, so double precision runs the scalar
+code on PowerPC. It works on big- and little-endian targets and doesn't need
+VSX. It is selected when the compiler defines `__ALTIVEC__`, which is the
+default on little-endian `ppc64le`; elsewhere pass e.g.
+`-DCMAKE_C_FLAGS=-maltivec`. GCC and clang warn that `vec_lvsl` is deprecated
+on little-endian; this is harmless: the unaligned-load idiom it is used for
+is correct there.
 
-### FetchContent (CMake 3.11+)
+To check that the backend is active, look for `float: ALTIVEC` in CMake's
+"Detected SIMD backend" line, and run `test_pffft_float --test-simd` (also
+registered as the `test_simd_float` ctest test).
 
-```cmake
-include(FetchContent)
+### Arm Cortex-M: experimental Helium backend
 
-FetchContent_Declare(pffft
-    GIT_REPOSITORY https://github.com/marton78/pffft.git
-    GIT_TAG master
-)
-FetchContent_MakeAvailable(pffft)
+On Cortex-M cores pffft runs its portable scalar code by default. Armv8.1-M
+cores with Helium (MVE), such as Cortex-M55 and Cortex-M85, can use the
+**experimental** float backend in `src/simd/pf_helium_float.h` with
+`-DPFFFT_USE_HELIUM=ON` (outside CMake: `-DPFFFT_ENABLE_HELIUM` with
+`-mcpu=cortex-m55` or similar). It is tested for correctness under QEMU, but
+has not been benchmarked on hardware, so it may well be slower than the scalar
+code; measurements are welcome. Double precision stays scalar, as MVE has no
+double-precision lanes.
 
-target_link_libraries(my_app PRIVATE PFFFT::PFFFT)
-```
-
-### add_subdirectory
-
-If you have pffft checked out as a subdirectory or git submodule:
-
-```cmake
-add_subdirectory(pffft)
-
-target_link_libraries(my_app PRIVATE PFFFT::PFFFT)
-```
-
-### Available targets
-
-| Target | Description |
-|---|---|
-| `PFFFT::PFFFT` (or `PFFFT`) | FFT library (float and/or double, depending on options) |
-| `PFFASTCONV` | Fast convolution library |
-| `PFDSP` | DSP utilities (mixer, carrier generation) |
-
-### Build control options
-
-When pffft is the top-level project, these default to `ON`. When included as a subdirectory, they default to `OFF`:
-
-* `PFFFT_BUILD_TESTS` — Build test executables and register CTest tests
-* `PFFFT_BUILD_BENCHMARKS` — Build benchmark executables
-* `PFFFT_BUILD_EXAMPLES` — Build example programs
-
-
-## History / Origin / Changes:
-Origin for this code/fork is Julien Pommier's pffft on bitbucket:
-[https://bitbucket.org/jpommier/pffft/](https://bitbucket.org/jpommier/pffft/)
-
-Git history shows following first commits of the major contributors:
-* Julien Pommier: November 19, 2011
-* Marton Danoczy: September 30, 2015
-* Hayati Ayguen: December 22, 2019
-* Dario Mambro: March 24, 2020
-* George Hilliard: March 15, 2025
-* Gunj Joshi: April 1, 2025
-* Aleksey Vaneev: December 20, 2025
-* Sergi Granell (xerpi): February 26, 2026
-
-There are a few other contributors not listed here.
-
-The main changes on top of the original include:
-* improved benchmarking, see [https://github.com/hayguen/pffft_benchmarks](https://github.com/hayguen/pffft_benchmarks)
-* double support
-* avx(2) support
-* c++ headers (wrapper)
-* additional API helper functions
-* additional library for fast convolution
-* const-correct setup arguments for all transform functions
-* zero-phase convolution support for linear-phase FIR filters
-  (`pffft_zconvert_zp()` / `pffft_zconvolve_zp()`, see `pffft.h`);
-  with default scaling the forward transform -> zconvolve_zp ->
-  backward pipeline yields the circular convolution at unit gain
-* unscaled frequency-domain multiply `pffft_zconvolve()` and `pffft_zconvolve_scale()`
-* cmake support
-* ctest
-
-The original repository has also continued to evolve independently, receiving
-portability fixes and warning cleanups from various contributors. Those changes
-have been cherry-picked into this fork where applicable. See the
-[Appendix: upstream commit map](#appendix-upstream-commit-map) for a full
-commit-by-commit comparison.
-
-
-## Comparison with other FFTs:
-The idea was not to break speed records, but to get a decently fast
-fft that is at least 50% as fast as the fastest FFT -- especially on
-slowest computers . I'm more focused on getting the best performance
-on slow cpus (Atom, Intel Core 1, old Athlons, ARM Cortex-A9...), than
-on getting top performance on today fastest cpus.
-
-It can be used in a real-time context as the fft functions do not
-perform any memory allocation -- that is why they accept a 'work'
-array in their arguments.
-
-It is also a bit focused on performing 1D convolutions, that is why it
-provides "unordered" FFTs , and a fourier domain convolution
-operation.
-
-Very interesting is [https://www.nayuki.io/page/free-small-fft-in-multiple-languages](https://www.nayuki.io/page/free-small-fft-in-multiple-languages).
-It shows how small an FFT can be - including the Bluestein algorithm, but it's everything else than fast.
-The whole C++ implementation file is 161 lines, including the Copyright header, see
-[https://github.com/nayuki/Nayuki-web-published-code/blob/master/free-small-fft-in-multiple-languages/FftComplex.cpp](https://github.com/nayuki/Nayuki-web-published-code/blob/master/free-small-fft-in-multiple-languages/FftComplex.cpp)
-
-## Dependencies / Required Linux packages
-
-On Debian/Ubuntu Linux following packages should be installed:
+The tests can be run on QEMU's Cortex-M55 board with `arm-none-eabi-gcc`
+(with newlib) and `qemu-system-arm`:
 
 ```
-sudo apt-get install build-essential gcc g++ cmake
+cmake -B build_m55 -DCMAKE_TOOLCHAIN_FILE=tests/cortex-m55/toolchain.cmake -DPFFFT_USE_HELIUM=ON
+cmake --build build_m55
+ctest --test-dir build_m55 -E "^bench_"
 ```
 
+The `bench_*` tests are excluded because they allocate about 1 GiB.
 
-## Benchmarks and results
+## Benchmarks
 
-#### Quicklink
-Find results at [https://github.com/hayguen/pffft_benchmarks](https://github.com/hayguen/pffft_benchmarks).
+Benchmark results, with plots, are collected at [https://github.com/hayguen/pffft_benchmarks](https://github.com/hayguen/pffft_benchmarks).
+They are stored in a separate git-repository to keep this repository's sources small.
+You might contribute by providing us the results of your computer(s).
 
-#### General
-My (Hayati Ayguen) first look at FFT-benchmarks was with [benchFFT](http://www.fftw.org/benchfft/)
-and especially the results of the benchmarks [results](http://www.fftw.org/speed/),
-which demonstrate the performance of the [FFTW](http://www.fftw.org/).
-Looking at the benchmarked computer systems from todays view (2021), these are quite outdated.
-
-Having a look into the [benchFFT source code](http://www.fftw.org/benchfft/benchfft-3.1.tar.gz),
-the latest source changes, including competitive fft implementations, are dated November 2003.
-
-In 2019, when pffft got my attention at [bitbucket](https://bitbucket.org/jpommier/pffft/src/master/),
-there were also some benchmark results.
-Unfortunately the results are tables with numbers - without graphical plots.
-Without the plots, i could not get an impression. That was, why i started
-[https://github.com/hayguen/pffft_benchmarks](https://github.com/hayguen/pffft_benchmarks),
-which includes GnuPlot figures.
-
-Today in June 2021, i realized the existence of [https://github.com/FFTW/benchfft](https://github.com/FFTW/benchfft).
-This repository is much more up-to-date with a commit in December 2020.
-Unfortunately, it looks not so simple to get it run - including the generation of plots.
-
-Is there any website showing benchFFT results of more recent computer systems?
-
-Of course, it's very important, that a benchmark can be compared with a bunch
-of different FFT algorithms/implementations.
-This requires to have these compiled/built and utilizable.
-
-
-#### Git submodules for Green-, Kiss- and Pocket-FFT
-Sources for [Green-](https://github.com/hayguen/greenffts),
+### Git submodules for Green-, Kiss-, and Pocket-FFT
+The benchmarks compare against other FFT libraries. Sources for [Green-](https://github.com/hayguen/greenffts),
 [Kiss-](https://github.com/hayguen/kissfft)
 and [Pocket-FFT](https://github.com/hayguen/pocketfft)
 can be downloaded directly with the sources of this repository - using git submodules:
@@ -435,51 +411,44 @@ can be downloaded directly with the sources of this repository - using git submo
 git clone --recursive https://github.com/marton78/pffft.git
 ```
 
-Important is `--recursive`, that does also fetch the submodules directly.
-But you might retrieve the submodules later, too:
+`--recursive` fetches the submodules too.
+You can also retrieve them later:
 ```
 git submodule update --init
 ```
 
-#### Fastest Fourier Transform in the West: FFTW
-To allow comparison with FFTW [http://www.fftw.org/](http://www.fftw.org/),
-cmake option `-DPFFFT_USE_BENCH_FFTW=ON` has to be used with following commands.
-The cmake option requires previous setup of following (debian/ubuntu) package:
-```
-sudo apt-get install libfftw3-dev
-```
+### Fastest Fourier Transform in the West: FFTW
+To compare with [FFTW](http://www.fftw.org/), install it
+(on Debian/Ubuntu: `sudo apt-get install libfftw3-dev`) and use cmake option
+`-DPFFFT_USE_BENCH_FFTW=ON` in the benchmark build below.
 
-#### Intel Math Kernel Library: MKL
-Intel's MKL [https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html](https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html)
-currently looks even faster than FFTW.
+### Intel Math Kernel Library: MKL
+To compare with Intel's [oneMKL](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html),
+install it (on Ubuntu-Linux the package `intel-mkl`, on Debian `intel-mkl-full`)
+and use cmake option `-DPFFFT_USE_BENCH_MKL=ON`.
 
-On Ubuntu-Linux it's easy to setup with the package `intel-mkl`.
-Similar on Debian: `intel-mkl-full`.
-
-There are special repositories for following Linux distributions:
-* Debian/apt: [https://software.intel.com/content/www/us/en/develop/articles/installing-intel-free-libs-and-python-apt-repo.html](https://software.intel.com/content/www/us/en/develop/articles/installing-intel-free-libs-and-python-apt-repo.html)
-* RedHat/yum: [https://software.intel.com/content/www/us/en/develop/articles/installing-intel-free-libs-and-python-yum-repo.html](https://software.intel.com/content/www/us/en/develop/articles/installing-intel-free-libs-and-python-yum-repo.html)
-* Gentoo/ebuild: [https://packages.gentoo.org/packages/sci-libs/mkl](https://packages.gentoo.org/packages/sci-libs/mkl)
-
-#### Performing the benchmarks - with CMake
-Benchmarks should be prepared by creating a special build folder
+### Performing the benchmarks - with CMake
+The main build's benchmark executables accept the same `PFFFT_USE_BENCH_*`
+options. The separate project in `bench/` builds and runs the float and double
+benchmarks and packs the results, with system information, into a `.tgz` for
+the results repository. Use it in its own build folder:
 ```
 mkdir build_benches
 cd build_benches
 cmake ../bench
 ```
 
-There are several CMake options to parametrize, which fft implementations should be benched.
+Several CMake options select which FFT implementations are benchmarked.
 You can explore all available options with `cmake-gui` or `ccmake`, see [CMake](#cmake).
 
 Some of the options:
 * `BENCH_ID`         name the benchmark - used in filename
 * `BENCH_ARCH`       target architecture passed to compiler for code optimization
-* `PFFFT_USE_BENCH_FFTW`   use (system-installed) FFTW3 in fft benchmark? (default: OFF)
-* `PFFFT_USE_BENCH_GREEN`  use Green FFT in fft benchmark? (default: ON)
-* `PFFFT_USE_BENCH_KISS`   use KissFFT in fft benchmark? (default: ON)
-* `PFFFT_USE_BENCH_POCKET` use PocketFFT in fft benchmark? (default: ON)
-* `PFFFT_USE_BENCH_MKL`    use Intel MKL in fft benchmark?  (default: OFF)
+* `PFFFT_USE_BENCH_FFTW`   use (system-installed) FFTW3 in FFT benchmark (default: OFF)
+* `PFFFT_USE_BENCH_GREEN`  use Green FFT in FFT benchmark (default: ON)
+* `PFFFT_USE_BENCH_KISS`   use KissFFT in FFT benchmark (default: ON)
+* `PFFFT_USE_BENCH_POCKET` use PocketFFT in FFT benchmark (default: ON)
+* `PFFFT_USE_BENCH_MKL`    use Intel MKL in FFT benchmark (default: OFF)
 
 These options can be passed to `cmake` at command line, e.g.
 ```
@@ -494,44 +463,67 @@ cmake --build .
 You can also specify to use a different compiler/version with the cmake step, e.g.:
 
 ```
-CC=/usr/bin/gcc-9 CXX=/usr/bin/g++-9 cmake -DBENCH_ID=gcc9 -DBENCH_ARCH=native -DPFFFT_USE_BENCH_FFTW=ON -DPFFFT_USE_BENCH_MKL=ON ../bench
-```
-
-```
 CC=/usr/bin/clang-11 CXX=/usr/bin/clang++-11 cmake -DBENCH_ID=clang11 -DBENCH_ARCH=native -DPFFFT_USE_BENCH_FFTW=ON -DPFFFT_USE_BENCH_MKL=ON ../bench
 ```
 
-For using MSVC/Windows, the cmake command requires/needs the generator and architecture options and to be called from the VS Developer prompt:
-```
-cmake -G "Visual Studio 16 2019" -A x64 ../bench/
-```
-
-see [https://cmake.org/cmake/help/v3.15/manual/cmake-generators.7.html#visual-studio-generators](https://cmake.org/cmake/help/v3.15/manual/cmake-generators.7.html#visual-studio-generators)
-
-
+On Windows, call cmake from the VS Developer prompt.
 
 For running with different compiler version(s):
 * copy the result file (.tgz), e.g. `cp *.tgz ../`
-* delete the build directory: `rm -rf *`
+* empty the build directory: `rm -rf *`
 * then continue with the cmake step
 
+## History and changes
+This is a fork of Julien Pommier's pffft on
+[Bitbucket](https://bitbucket.org/jpommier/pffft/). His README, as of upstream
+commit `0979688`, is kept in [README.pommier.md](README.pommier.md).
 
-#### Benchmark results and contribution
-You might contribute by providing us the results of your computer(s).
+Git history shows the following first commits of the major contributors:
+* Julien Pommier: November 19, 2011
+* Marton Danoczy: September 30, 2015
+* Hayati Ayguen: December 22, 2019
+* Dario Mambro: March 24, 2020
+* George Hilliard: March 15, 2025
+* Gunj Joshi: April 1, 2025
+* Aleksey Vaneev: December 20, 2025
+* Sergi Granell: February 26, 2026
+* Michael Neuling: May 26, 2026
+* Piotr Kubaj: September 29, 2026
 
-The benchmark results are stored in a separate git-repository:
-See [https://github.com/hayguen/pffft_benchmarks](https://github.com/hayguen/pffft_benchmarks).
+There are a few other contributors not listed here.
 
-This is to keep this repositories' sources small.
+The main changes on top of the original include:
+* improved benchmarking, see [https://github.com/hayguen/pffft_benchmarks](https://github.com/hayguen/pffft_benchmarks)
+* double support
+* AVX support for double
+* NEON double, a dedicated WASM SIMD, RISC-V RVV, and ARM Helium backends
+* C++ headers (wrapper)
+* additional API helper functions
+* additional library for fast convolution
+* const-correct setup arguments for all transform functions
+* zero-phase convolution support for linear-phase FIR filters
+  (`pffft_zconvert_zp()` / `pffft_zconvolve_zp()`, see `include/pffft/pffft.h`);
+  with default scaling the forward transform -> zconvolve_zp ->
+  backward pipeline yields the circular convolution at unit gain
+* unscaled frequency-domain multiply `pffft_zconvolve()` and `pffft_zconvolve_scale()`
+* CMake support
+* CTest
+
+The original repository has also continued to evolve independently, receiving
+portability fixes and warning cleanups from various contributors. Those changes
+have been cherry-picked into this fork where applicable. See the
+[Appendix: upstream commit map](#appendix-upstream-commit-map) for a full
+commit-by-commit comparison.
 
 
 ## Appendix: upstream commit map
 
 The table below lists every non-merge commit on
-[jpommier/pffft master](https://bitbucket.org/jpommier/pffft/) starting from
+[jpommier/pffft master](https://bitbucket.org/jpommier/pffft/) after
 the last common ancestor (`16490be`, _"added numbers for the tegra K1"_,
-2014-09-03). For each commit the corresponding hash in this fork is given, or
-an explanation of why the change was not ported.
+2014-09-03). The *Ours* column gives the commit in this fork that ports the
+change or made it unnecessary; `--` means there is no such commit, and *Notes*
+says why.
 
 | Date | Upstream | Author | Change | Ours | Notes |
 |------|----------|--------|--------|------|-------|
