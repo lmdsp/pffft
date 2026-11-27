@@ -22,6 +22,9 @@ option(PFFFT_USE_SIMD        "use SIMD (SSE/AVX/NEON/ALTIVEC) CPU features? - " 
 option(PFFFT_USE_SCALAR_VECT "use 4-element vector scalar operations (if no other SIMD)" ON)
 option(PFFFT_USE_HELIUM "use the experimental, unbenchmarked Arm Helium (MVE) backend on Armv8.1-M?" OFF)
 option(PFFFT_USE_WASM_RELAXED_SIMD "use WebAssembly Relaxed SIMD for higher performance? requires a browser/runtime with Relaxed SIMD support" OFF)
+set(PFFFT_PREFETCH_DIST "" CACHE STRING "x86: prefetch distance in bytes for the FFT passes; 0 turns prefetching off (set it for AMD CPUs, see README); empty: the default")
+set(PFFFT_PREFETCH_MIN "" CACHE STRING "x86: smallest pass in bytes that prefetches; empty: the default (24576)")
+set(PFFFT_SPLIT_MAX "" CACHE STRING "largest array in bytes that the transforms do not split into blocks that fit the cache; empty: the default, by target (1 MiB on x86 but Zen and on Android, 8 MiB on Zen and Apple arm64, 16 MiB on other Arm)")
 
 # what to install?
 option(INSTALL_PFFFT      "install pffft to CMAKE_INSTALL_PREFIX?" ON)
@@ -33,13 +36,14 @@ option(PFFFT_USE_BENCH_FFTW   "use FFTW3 from FFTW3_ROOT (see benchmarks/build_f
 option(PFFFT_USE_BENCH_GREEN  "use Green FFT in fft benchmark? - if exists in subdir" ON)
 option(PFFFT_USE_BENCH_KISS   "use KissFFT in fft benchmark? - if exists in subdir" ON)
 option(PFFFT_USE_BENCH_POCKET "use PocketFFT in fft benchmark? - if exists in subdir" ON)
+option(PFFFT_USE_BENCH_OOURA  "use Ooura's FFT in fft benchmark? - if exists in subdir" ON)
 option(PFFFT_USE_BENCH_MKL    "use Intel MKL in fft benchmark? needs to be installed" OFF)
 option(PFFFT_USE_FFTPACK      "compile and use FFTPACK in fft benchmark & validation?" ON)
 if (APPLE)
   option(PFFFT_USE_BENCH_VDSP "use vDSP of Apple's Accelerate framework in fft benchmark?" ON)
 endif()
 
-option(PFFFT_USE_DEBUG_ASAN  "use GCC's address sanitizer?" OFF)
+option(PFFFT_USE_DEBUG_ASAN  "use the address sanitizer (gcc, clang)?" OFF)
 
 option(PFFFT_DISABLE_LINK_WITH_M "Disables linking with m library to build with clangCL from MSVC" OFF)
 
@@ -74,18 +78,14 @@ include(cmake/target_optimizations.cmake)
 include(cmake/compiler_warnings.cmake)
 include(cmake/simd_backend_probe.cmake)
 find_package(PAPI)
-find_package(MIPP)
-if (MIPP_FOUND)
-# if (TARGET MIPP)
-    message(STATUS "found MIPP")
-else()
-    message(STATUS "NOT found MIPP")
-endif()
 
 
-if (PFFFT_USE_DEBUG_ASAN)
-  set(ASANLIB "asan")
+if (PFFFT_USE_DEBUG_ASAN AND NOT MSVC)
+  # the compiler driver links its own runtime: libasan for gcc, the
+  # compiler-rt one for clang and AppleClang, which have no -lasan
+  set(ASANLIB "-fsanitize=address")
 else()
+  # MSVC needs /fsanitize=address only when compiling
   set(ASANLIB "")
 endif()
 
@@ -185,9 +185,26 @@ if (PFFFT_USE_DEBUG_ASAN)
   target_compile_options(PFFFT PRIVATE "-fsanitize=address")
 endif()
 target_set_c_arch_flags(PFFFT)
+# GCC's RISC-V vector code fuses multiplies and adds into FMAs even without
+# floating-point contraction (the default with -std=c99), and not alike in
+# every function: double-precision ordered transforms then differed in their
+# last bits from pffft_transform followed by pffft_zreorder (gcc 14 and 15).
+# With contraction, GCC fuses them in the source, the same way everywhere.
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+  target_compile_options(PFFFT PRIVATE "-ffp-contract=fast")
+endif()
 if (NOT PFFFT_USE_SIMD)
   target_compile_definitions(PFFFT PRIVATE PFFFT_SIMD_DISABLE=1)
 endif()
+foreach(knob PFFFT_PREFETCH_DIST PFFFT_PREFETCH_MIN PFFFT_SPLIT_MAX)
+  if (NOT ${knob} STREQUAL "")
+    # decimal only: a leading 0 would make the preprocessor read octal
+    if (NOT ${knob} MATCHES "^(0|[1-9][0-9]*)$")
+      message(FATAL_ERROR "${knob} must be empty or a number of bytes, not '${${knob}}'")
+    endif()
+    target_compile_definitions(PFFFT PRIVATE "${knob}=${${knob}}")
+  endif()
+endforeach()
 pffft_report_simd_backend(PFFFT)
 target_link_libraries( PFFFT ${ASANLIB} ${MATHLIB} )
 target_include_directories(PFFFT
@@ -289,6 +306,9 @@ if (INSTALL_TARGETS)
     EXPORT pffft-targets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    # a DLL is a RUNTIME artifact; CMake fills in a default destination for
+    # it only when neither ARCHIVE nor RUNTIME is given
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
   install( FILES  ${INSTALL_HEADERS}  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pffft)
 

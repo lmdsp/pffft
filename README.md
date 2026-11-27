@@ -141,7 +141,9 @@ Some of the options:
   respective library (default: ON, OFF, OFF)
 * `TARGET_C_ARCH` / `TARGET_CXX_ARCH` to set the target architecture: a
   `-march` value for gcc/clang (e.g. `haswell`, `armv7-a`, `rv64gcv`, or
-  `native`) or an `/arch` value for MSVC (e.g. `AVX2`)
+  `native`) or an `/arch` value for MSVC (e.g. `AVX2`). On 64-bit RISC-V,
+  `auto` enables the vector extension if the build machine has it (see
+  below). Default: `none`, the compiler's default
 * `TARGET_C_EXTRA` / `TARGET_CXX_EXTRA` to add a preset of gcc/clang options,
   e.g. `neon_vfpv4` or `neon_rpi4_a72` (32-bit ARM NEON), or `apple_m1`
 
@@ -151,10 +153,9 @@ on other 32-bit ARM targets e.g. with `-mfpu=neon`, or one of the
 `TARGET_C_EXTRA=neon_*` presets), WASM SIMD with `-msimd128`, and RVV with a
 `-march` that includes `v`. pffft builds with the toolchain's target flags.
 On WebAssembly it adds `-msimd128` (and `-mrelaxed-simd` with
-`PFFFT_USE_WASM_RELAXED_SIMD`), on RISC-V the `-march` described below unless
-`TARGET_C_ARCH` is set; otherwise a SIMD instruction set is enabled with the
-compiler's own flags, e.g. through `TARGET_C_ARCH` / `TARGET_C_EXTRA`. `cmake`
-prints the backend it detected.
+`PFFFT_USE_WASM_RELAXED_SIMD`); otherwise a SIMD instruction set is enabled
+with the compiler's own flags, e.g. through `TARGET_C_ARCH` /
+`TARGET_C_EXTRA`. `cmake` prints the backend it detected.
 
 Options can be passed to `cmake` at command line, e.g.
 ```
@@ -293,6 +294,86 @@ AMD Piledriver CPU, so enabling it unconditionally would break older hardware.
 Note that FMA changes results by up to one ULP, since it rounds once where the
 separate multiply and add round twice.
 
+### x86: output prefetching, and AMD
+
+Out of L1, the passes of the FFT are bound by their stores. On x86, pffft
+therefore prefetches the output of each pass of at least 24 KiB, 128 bytes
+ahead (all passes but the radix-5 one of complex transforms and the first
+pass of a forward real transform, which writes a single stream). On Intel CPUs
+(Xeon 6975P-C, Xeon Platinum 8573C, Core i7-8700B), real transforms out of L1
+ran up to 43% faster and complex ones up to 23%;
+[docs/benchmarks.md](docs/benchmarks.md) has the details. AMD Zen CPUs did
+not gain from it: with gcc they were up to 6% slower, with MSVC up to 14% at
+single lengths (5% on average from n = 4096 on).
+
+So pffft does not prefetch when the compiler targets Zen:
+`-DTARGET_C_ARCH=znver3` and the like (with gcc, clang or clang-cl), or
+`native` on a Zen CPU with a compiler that knows it (for Zen 5, e.g. gcc 14
+or clang 19). Set `PFFFT_PREFETCH_DIST` to 0 yourself if the library will run
+on AMD CPUs and is built
+
+- for generic x86-64: no `TARGET_C_ARCH`, or `x86-64-v2`, `-v3` or `-v4`, as
+  in distribution packages, also with `-mtune=znverN`, which pffft can't
+  see;
+- for an Intel or an older x86 architecture, `haswell` from the FMA note
+  above included;
+- with `native` on a Zen CPU the compiler doesn't know, or for a Zen after
+  Zen 6;
+- with MSVC (cl.exe): none of its options defines a macro that names the
+  CPU, not even `/favor:AMD64`.
+
+```
+cmake -DPFFFT_PREFETCH_DIST=0 ..
+```
+
+On an AMD EPYC 7763 with MSVC this made pffft as fast as without the
+prefetching code.
+
+With MSVC the gain on Intel is smaller than with gcc or clang: MSVC computes
+each prefetch address with a few more instructions. On a Xeon Platinum
+8573C, real transforms still ran up to 43% faster in double precision and up
+to 16% in single precision, while complex ones changed by -4% to +13%. On an
+Ice Lake Xeon 8370C (measured with an earlier version that prefetched in all
+complex passes), double-precision real transforms gained up to 24%, but
+single-precision real transforms were up to 6% slower at n = 8192 and at
+lengths with a factor 5 (15360, 48000, 100000), and complex transforms up to
+7%.
+
+`PFFFT_PREFETCH_DIST` is the distance in bytes, 0 for off, and
+`PFFFT_PREFETCH_MIN` (default 24576) the smallest pass, in bytes, that
+prefetches. With CMake, set them as above (`-DPFFFT_PREFETCH_MIN=...`); an
+empty value keeps the default. Without CMake, define them as compile
+definitions (`-DPFFFT_PREFETCH_DIST=0`, or `/DPFFFT_PREFETCH_DIST=0` with
+MSVC).
+
+### Long transforms: splitting, and AMD
+
+pffft runs the passes of an FFT one after the other, each over the whole
+array. That is fast while the data fits in the cache, but for long
+transforms every pass has to go through main memory. So for arrays larger
+than `PFFFT_SPLIT_MAX` bytes, the transform is split into 3, 4 or 5
+independent shorter transforms, recursively until they fit in the cache,
+which are then processed one after the other. This divide and conquer
+approach makes transforms of 2^20 points and more up to 27% faster on ARM
+(the most on an Android phone and on Apple's chips, hardly at all on Arm's
+Neoverse servers), and 20-39% faster on Intel CPUs.
+
+The best size depends on the CPU's caches, so the default depends on the
+target: 1 MiB on x86 and Android, 8 MiB on Apple's arm64 chips and when
+the compiler targets AMD Zen (as for the prefetching above), 16 MiB on
+other Arm CPUs.
+AMD CPUs do best with 8 MiB; with 1 MiB some lengths are slower than
+without splitting. Set it yourself for builds the compiler can't
+target at Zen (the list above):
+
+```
+cmake -DPFFFT_SPLIT_MAX=8388608 ..
+```
+
+A larger value splits less; a value larger than any array turns splitting
+off. Splitting needs SIMD. As for the prefetching, an empty value keeps
+the default, and without CMake it is a compile definition.
+
 ### ARMv7 (32-bit ARM): prefer clang over gcc
 
 On 32-bit ARM, **gcc emits very inefficient assembly**, with a lot more
@@ -339,23 +420,36 @@ the WASM SIMD backend.
 
 ### RISC-V: RVV vector backend
 
-When the target is detected as `riscv64`, the build defaults to
-`-march=rv64gcv` (the `v` is the vector extension, V), enabling the
-RVV 1.0 vector backend in `src/simd/pf_rvv_{float,double}.h`. On
-hardware with `VLEN >= 256` (e.g. Spacemit X100) the configure step
-also probes the host VLEN and appends a `zvlNNNb` suffix so the
-compiler can emit single 4-wide double-precision vector ops. If the
-target turns out to lack V, the build falls back to `rv64gc` and the
-scalar code. To opt out explicitly, pass `-DPFFFT_USE_SIMD=OFF` or set
-both `-DTARGET_C_ARCH=rv64gc` and `-DTARGET_CXX_ARCH=rv64gc`.
+The RVV 1.0 vector backend in `src/simd/pf_rvv_{float,double}.h` is used
+when the compiler enables the vector extension, V. Toolchains for the RVA23
+profile (e.g. Ubuntu 26.04's) do so by default; for others, pass a `-march`
+with `v`, e.g. `-DTARGET_C_ARCH=rv64gcv -DTARGET_CXX_ARCH=rv64gcv`. Such a
+build runs only on CPUs with V. The backend is written with GCC vector
+types, which gcc 14 and later turn into RVV instructions; gcc 13 compiles
+them to scalar code, which `cmake` reports as `RVV (scalar code)`, with a
+warning.
+
+`-DTARGET_C_ARCH=auto -DTARGET_CXX_ARCH=auto` enables V if the build machine
+has it, like `-march=native` does elsewhere. It adds nothing if the compiler
+already enables V with the build's flags, `CMAKE_C_FLAGS` and those of the
+build type. Otherwise it runs a probe built with `-march=rv64gcv`;
+if the probe runs, the build gets `-march=rv64gcv`, and in a native build on
+hardware with `VLEN >= 256` (e.g. Spacemit X100) also the matching
+`zvlNNNb`, so the compiler can emit single 4-wide double-precision vector
+ops. If the probe fails, the compiler's default is kept. As `auto` chooses
+the `-march` itself, combining it with an `-march` or `-mcpu` in the
+compiler flags is an error; use `none` to keep the one in the flags. An
+`-march` that `auto` can't recognise, e.g. inside a complex generator
+expression in a parent project's compile options, still takes precedence.
 
 When cross-compiling, the probe runs under `CMAKE_CROSSCOMPILING_EMULATOR`;
-with QEMU, enable V and pick the VLEN explicitly, e.g.
+without one, `auto` keeps the compiler's default. With QEMU, enable V
+explicitly, e.g.
 `-DCMAKE_CROSSCOMPILING_EMULATOR="qemu-riscv64-static;-L;/usr/riscv64-linux-gnu;-cpu;rv64,v=true,vlen=256,vext_spec=v1.0"`.
 Distributions that build their riscv64 libraries for the RVA23 profile (e.g.
-Ubuntu 26.04) need an RVA23 CPU model to run the probe, e.g.
+Ubuntu 26.04) need an RVA23 CPU model to run anything, e.g.
 `-cpu;rva23u64,vlen=256`. Use `qemu-riscv64` from the `qemu-user` package
-there, which no longer ships a `-static` binary. Without an emulator the build assumes V is present.
+there, which no longer ships a `-static` binary.
 
 ### PowerPC: AltiVec backend
 
@@ -396,15 +490,19 @@ The `bench_*` tests are excluded because they allocate about 1 GiB.
 
 ## Benchmarks
 
-pffft is faster than most FFT libraries: on eight machines, from phones to
-servers, arm64 and x86, it beat PocketFFT, KISS FFT, FFTPACK and Green FFT
-at nearly every length. Only FFTW and Apple's vDSP are sometimes faster.
-Thanks to performance fixes, pffft is now on average 11 to 13% faster than
-Julien Pommier's original below n = 4096, and 5 to 8% faster at larger n.
+pffft is faster than most FFT libraries: on nine machines, from phones to
+servers, arm64 and x86, it beat PocketFFT, KISS FFT, FFTPACK, Green FFT and
+Ooura's FFT at nearly every length. Only FFTW and Apple's vDSP are often
+faster; Ooura's FFT is in double precision from 2^18 to 2^20 on Intel
+CPUs, and PocketFFT at some complex lengths on an AMD EPYC.
+Thanks to performance fixes, pffft is now on average 34 to 35% faster than
+Julien Pommier's original below n = 4096 on Apple's arm64 chips, and 28 to
+31% faster at larger n (up to 2^22); on x86 with Intel CPUs, 32 to 42% and
+37 to 55%.
 [docs/benchmarks.md](docs/benchmarks.md) has the details.
 
 `bench_fft` measures pffft against other FFT libraries (FFTPACK, FFTW,
-KissFFT, PocketFFT, Green FFT, Apple's vDSP and Intel's MKL), across transform
+KissFFT, PocketFFT, Green FFT, Ooura's FFT, Apple's vDSP and Intel's MKL), across transform
 lengths, and against other revisions of pffft, on this computer, an attached
 Android phone or an attached iPhone. [benchmarks/README.md](benchmarks/README.md)
 explains how to use it and how it measures.
@@ -414,10 +512,11 @@ python3 benchmarks/run.py -o local.csv           # build and run the benchmark h
 python3 benchmarks/compare.py master .           # the working tree against master
 ```
 
-### Git submodules for Green-, Kiss-, and Pocket-FFT
+### Git submodules for Green-, Kiss-, Pocket- and Ooura's FFT
 The benchmarks compare against other FFT libraries. Sources for [Green-](https://github.com/hayguen/greenffts),
-[Kiss-](https://github.com/hayguen/kissfft)
-and [Pocket-FFT](https://github.com/hayguen/pocketfft)
+[Kiss-](https://github.com/hayguen/kissfft),
+[Pocket-FFT](https://github.com/hayguen/pocketfft)
+and [Ooura's FFT](https://github.com/hayguen/OouraFFT)
 can be downloaded directly with the sources of this repository - using git submodules:
 ```
 git clone --recursive https://github.com/marton78/pffft.git

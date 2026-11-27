@@ -13,7 +13,7 @@ A panel per (precision, transform kind), with n on the x axis:
   the measured time. --time takes the measured time throughout,
   --per-cycle plots flops per CPU cycle. A solid line joins the powers of
   two, a dashed one the other lengths; engines that do only powers of two
-  (vdsp, green) get there, dotted, the flops of n at the cost of the next
+  (vdsp, green, ooura) get there, dotted, the flops of n at the cost of the next
   power of two, as if their user padded;
 - for CSVs that compare.py wrote (-o): B's speed-up over A in percent,
   higher is better, the median and the range over all launches and trials;
@@ -26,6 +26,7 @@ Without -o the figure opens in a window. Needs matplotlib 3.7 or later.
 from __future__ import annotations
 
 import argparse
+import io
 import itertools
 import math
 import re
@@ -35,17 +36,21 @@ from pathlib import Path
 
 import results
 
-POW2_ONLY = {"vdsp", "green"}  # engines that support powers of two only
-# An engine keeps its color in every figure. The seven libraries take seven
-# colors picked to be as different as possible, in OKLab, for every pair:
-# worst pair 17.4 apart (x100) to normal vision, 8.8 under simulated protan or
-# deutan vision. fftw-meas is fftw-est at 45% HSV saturation, to read as one
-# library.
+POW2_ONLY = {"vdsp", "green", "ooura"}  # engines that support powers of two only
+# An engine keeps its color in every figure, and where it can, its color says
+# what it is: Green FFT green, vDSP (Apple only) gray, FFTW orange with
+# fftw-meas as a pale fftw-est (45% of the way to the surface), pffft the
+# strongest blue. The others were then picked, within a hue each (PocketFFT
+# brown, KISS FFT pink, FFTPACK crimson, Ooura navy, MKL teal), to be as
+# different as possible in OKLab, for every pair, since any two lines can
+# cross: without MKL the worst pair is 15.2 apart (x100) to normal vision and
+# 7.8 under simulated protan or deutan vision (Machado et al. 2009); MKL,
+# x86 only and never next to vDSP, is at least 14.0 and 9.5 from the others.
 # pffft@LABEL engines take the colors of the libraries that are absent.
-SERIES = {"pffft": "#2a78d6", "fftw-est": "#f06a2e", "fftw-meas": "#f0a584", "vdsp": "#43a26d",
-          "pocketfft": "#9a5505", "kissfft": "#e678c0", "fftpack": "#bb1664", "green": "#7a2eb4",
-          "mkl": "#898781"}
-SPARE = ["#bb1664", "#43a26d", "#7a2eb4", "#9a5505", "#e678c0", "#f06a2e"]
+SERIES = {"pffft": "#2a78d6", "fftw-est": "#e16037", "fftw-meas": "#eda68f", "vdsp": "#848380",
+          "pocketfft": "#633416", "kissfft": "#cf76bb", "fftpack": "#c1154f", "green": "#42660a",
+          "ooura": "#102459", "mkl": "#196d7e"}
+SPARE = ["#c1154f", "#42660a", "#e16037", "#633416", "#cf76bb", "#102459"]
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 SURFACE, GRID, AXIS = "#fcfcfb", "#e1e0d9", "#c3c2b7"
 FASTER, SLOWER = "#2a78d6", "#e34948"
@@ -70,12 +75,15 @@ DEVICES = {"iPhone12,3": "iPhone 11 Pro (A13)", "iPhone12,1": "iPhone 11 (A13)",
 def device(cpu):
     """A readable name for a CPU or device id: a known name, or the id
     without trademark signs and clock ("Intel(R) Core(TM) i7-8700B CPU @
-    3.20GHz": "Intel Core i7-8700B")."""
+    3.20GHz": "Intel Core i7-8700B"), in mixed case if it is all capitals."""
     if not cpu or cpu in DEVICES:
         return DEVICES.get(cpu, cpu)
     cpu = re.sub(r"\((R|TM|tm|r)\)", "", cpu)
-    cpu = re.sub(r"\s+(CPU\s+)?@\s*[\d.]+\s*GHz", "", cpu)
-    return re.sub(r"\s+", " ", cpu).strip()
+    cpu = re.sub(r"\s+(CPU\s+)?@\s*[\d.]+\s*GHz", "", cpu, flags=re.IGNORECASE)
+    cpu = re.sub(r"\s+", " ", cpu).strip()
+    if cpu.isupper():  # Windows on some Intel CPUs: "INTEL XEON PLATINUM 8573C"
+        cpu = " ".join(w.capitalize() if w.isalpha() and w not in ("AMD", "EPYC") else w for w in cpu.split())
+    return cpu
 
 
 def system(meta) -> str:
@@ -230,7 +238,8 @@ def engine_colors(engines):
 def label_for(e: str) -> str:
     return {"fftw-meas": "FFTW (measure)", "fftw-est": "FFTW (estimate)",
             "vdsp": "vDSP (Accelerate)", "pocketfft": "PocketFFT", "kissfft": "KISS FFT",
-            "fftpack": "FFTPACK", "green": "Green FFT", "mkl": "Intel MKL"}.get(e, e)
+            "fftpack": "FFTPACK", "green": "Green FFT", "ooura": "Ooura FFT",
+            "mkl": "Intel MKL"}.get(e, e)
 
 
 def plot_engines(args, files, plt) -> None:
@@ -340,12 +349,12 @@ def plot_engines(args, files, plt) -> None:
             ax.set_ylabel("flops per cycle" if mode == "cycles" else "GFLOPS", fontsize=8.5, color=INK2)
 
     handles = [Line2D([], [], color=color[e], lw=width[e], label=label_for(e)) for e in engines]
-    keys = [Line2D([], [], color=MUTED, lw=1.8, label="n a power of two")]
+    keys = [Line2D([], [], color=INK2, lw=1.8, label="n a power of two")]
     if other_n:
-        keys.append(Line2D([], [], color=MUTED, lw=1.2, ls=DASHED, label="n not a power of two"))
+        keys.append(Line2D([], [], color=INK2, lw=1.2, ls=DASHED, label="n not a power of two"))
     if padded:
         only = " and ".join(label_for(e) for e in engines if e in POW2_ONLY)
-        keys.append(Line2D([], [], color=MUTED, lw=1.2, ls=DOTTED,
+        keys.append(Line2D([], [], color=INK2, lw=1.2, ls=DOTTED,
                            label=f"n not a power of two, padded to the next one ({only})"))
     if trials > 1:
         keys.append(Patch(color=MUTED, alpha=0.25, lw=0, label=f"range over {trials} trials"))
@@ -445,9 +454,9 @@ def plot_compare(args, files, plt) -> None:
 
     handles = [Line2D([], [], color=colors[k % len(colors)], lw=2, marker=marks[k % len(marks)], ms=4.5, mew=0,
                       label=machine(meta)) for k, (_, meta, _) in enumerate(files)]
-    keys = [Line2D([], [], color=MUTED, lw=1.8, label="n a power of two")]
+    keys = [Line2D([], [], color=INK2, lw=1.8, label="n a power of two")]
     if other_n:
-        keys.append(Line2D([], [], color=MUTED, lw=1.2, ls=(0, (3.5, 2)), label="n not a power of two"))
+        keys.append(Line2D([], [], color=INK2, lw=1.2, ls=(0, (3.5, 2)), label="n not a power of two"))
     launches = files[0][1].get("launches", "?")
     per = int(files[0][1].get("trials", 0)) // max(1, int(files[0][1].get("launches", 1) or 1))
     keys.append(Patch(color=MUTED, alpha=0.25, lw=0, label=f"range over {launches} launches × {per} trials"))
@@ -464,10 +473,78 @@ def plot_compare(args, files, plt) -> None:
 
 
 def save(args, fig, plt) -> None:
-    if args.o:
-        fig.savefig(args.o, dpi=args.dpi, facecolor=SURFACE)
-    else:
+    if not args.o:
         plt.show()
+    elif Path(args.o).suffix.lower() == ".svg":
+        svg = io.StringIO()
+        fig.savefig(svg, format="svg", facecolor=SURFACE)
+        Path(args.o).write_text(slim_svg(svg.getvalue()) + "\n", encoding="utf-8")
+    else:
+        fig.savefig(args.o, dpi=args.dpi, facecolor=SURFACE)
+
+
+def svg_number(v: float) -> str:
+    s = f"{v:.2f}".rstrip("0").rstrip(".")
+    return "0" if s == "-0" else s
+
+
+def svg_relative_path(d: str) -> str:
+    """Path data of moves and lines in relative coordinates, which are shorter;
+    other path data unchanged. The input is rounded to 0.01 already, so the
+    differences are exact and the points don't drift."""
+    tokens = re.findall(r"[A-Za-z]|-?[\d.]+", d)
+    out, pos, start, relative, i = [], (0.0, 0.0), (0.0, 0.0), False, 0
+    while i < len(tokens):
+        c = tokens[i]
+        if c == "z":
+            out.append("z")
+            pos, relative, i = start, False, i + 1
+            continue
+        if c not in ("M", "L") or i + 2 >= len(tokens) or not (out or c == "M"):
+            return d
+        x, y = float(tokens[i + 1]), float(tokens[i + 2])
+        i += 3
+        if not out:
+            out.append(f"M{svg_number(x)} {svg_number(y)}")  # pairs after it would be absolute
+        else:
+            # a pair after "m" or "l" is a relative line
+            command = "m" if c == "M" else " " if relative else "l"
+            out.append(f"{command}{svg_number(x - pos[0])} {svg_number(y - pos[1])}")
+            relative = True
+        if c == "M":
+            start = (x, y)
+        pos = (x, y)
+    return "".join(out).replace(" -", "-")
+
+
+def slim_svg(svg: str) -> str:
+    """matplotlib's SVG, 40% smaller and rendered the same: coordinates rounded
+    to 0.01 pt, paths in relative coordinates, the style of a group of markers
+    written once on the group instead of on every marker, and without the
+    metadata, the ids nothing refers to and the indentation."""
+    head, svg_tag, body = svg.partition("<svg ")
+    tag, gt, body = body.partition(">")
+    head = re.sub(r"\s*\n\s*", " ", head + svg_tag + tag + gt)
+    body = re.sub(r"\s*<metadata>.*?</metadata>", "", body, flags=re.S)
+    body = re.sub(r'(?<=\s)(?:d|x|y|width|height|transform|style)="[^"]*"',
+                  lambda m: re.sub(r"-?\d+\.\d+", lambda v: svg_number(float(v.group())), m.group()), body)
+
+    def hoist(m):
+        group, uses = m.groups()
+        styles = set(re.findall(r'<use [^>]*?style="([^"]*)"', uses))
+        if len(styles) != 1 or len(re.findall(r"<use ", uses)) != len(re.findall(r'<use [^>]*?style="', uses)):
+            return m.group()
+        style = styles.pop()
+        return f'<g{group} style="{style}">' + uses.replace(f' style="{style}"', "") + "</g>"
+
+    body = re.sub(r'<g((?: clip-path="[^"]*")?)>((?:\s*<use [^>]*/>)+\s*)</g>', hoist, body)
+    body = re.sub(r'(?<=\s)d="([^"]*)"', lambda m: f'd="{svg_relative_path(m.group(1))}"', body)
+    used = set(re.findall(r"#([\w.-]+)", body))
+    body = re.sub(r' id="([^"]*)"', lambda m: m.group() if m.group(1) in used else "", body)
+    body = re.sub(r">\s+<", "><", body)
+    body = re.sub(r"\s*\n\s*", " ", body)
+    body = re.sub(r"<g>((?:(?!<g[ >]).)*?)</g>", r"\1", body)  # groups without attributes
+    return head + body
 
 
 def main() -> None:
@@ -498,7 +575,7 @@ def main() -> None:
                  "  uv run --with matplotlib python3 benchmarks/plot.py ...")
     plt.rcParams.update({"font.family": "sans-serif",
                          "font.sans-serif": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
-                         "svg.fonttype": "none"})
+                         "svg.fonttype": "none", "svg.hashsalt": "pffft"})
     if any("A" in meta and "B" in meta for _, meta, _ in files):
         plot_compare(args, files, plt)
     else:

@@ -10,8 +10,8 @@ adb, or an iPhone attached to a Mac. It answers three questions:
 3. Did a change make pffft faster or slower?
 
 The other two programs here, `bench_pf_mixer_float` and `bench_pf_conv_float`,
-measure the mixers (PFDSP) and the fast convolution (PFFASTCONV); this file
-is about bench_fft only.
+measure the mixers (PFDSP) and the direct convolution kernels of `pf_conv`,
+one build per architecture option; this file is about bench_fft only.
 
 ## Quick start
 
@@ -55,6 +55,7 @@ python3 benchmarks/run.py --target ios --fftw -o ios.csv
 python3 benchmarks/run.py -- --sizes 1024,4096 --prec f32 --trials 3   # after --: bench_fft options
 python3 benchmarks/compare.py master .                   # the working tree against master
 python3 benchmarks/compare.py c14802c master --target android -o cmp.csv
+python3 benchmarks/compare_many.py master a=HEAD~2 b=HEAD~1 c=HEAD --sizes 32,64,1024 -o many.csv
 uv run --with matplotlib python3 benchmarks/plot.py local.csv -o local.png
 uv run --with matplotlib python3 benchmarks/plot.py local.csv --engines pffft -o pffft.png
 uv run --with matplotlib python3 benchmarks/plot.py local.csv android.csv -o devices.png
@@ -77,6 +78,11 @@ uv run --with matplotlib python3 benchmarks/plot.py mac-cmp.csv ios-cmp.csv --na
   `-o` saves the measurements of all launches as one CSV, for plot.py.
   Each revision builds with its own defaults, so v1.0.0 and v1.1.0 get no
   NEON on arm64.
+- **compare_many.py** does the same for any number of revisions, each an
+  engine `pffft@LABEL` (`LABEL=REV`, or the revision itself), and prints
+  each one's speed-up over the first: one commit per engine separates the
+  effects of the commits of a branch in one run. A revision given twice is
+  loaded twice, which shows the noise floor inside the run.
 - **plot.py** draws speed against n, higher is faster: GFLOPS, counting
   5·n·log2(n) flops per complex transform and 2.5·n·log2(n) per real one
   (benchFFT's convention), so that lengths compare fairly. Where cycles were
@@ -86,7 +92,7 @@ uv run --with matplotlib python3 benchmarks/plot.py mac-cmp.csv ios-cmp.csv --na
   `--time` takes the measured time throughout, `--per-cycle` plots flops per
   CPU cycle. A panel per precision and transform kind; per engine a solid
   line through the powers of two and a dashed one through the other lengths,
-  with a band for the range over trials. vdsp and green, which do only powers
+  with a band for the range over trials. vdsp, green and ooura, which do only powers
   of two, get a dotted line there as if padded: the flops of n at the cost of
   the next power of two. Vertical lines mark where 4 arrays of n samples fill
   a cache (a rough guide), if the CSV header gives cache sizes and all files
@@ -181,12 +187,15 @@ What it cannot do:
 | Engine | Library | Precisions | Lengths | Notes |
 |---|---|---|---|---|
 | `pffft` | this tree, `pffft_transform_ordered` | f32, f64 | 2^a·3^b·5^c; real: multiple of 32, complex: of 16 | |
+| `pffft-ip` | this tree, `pffft_transform_ordered` in place | f32, f64 | as pffft | one array and the work array, as Ooura's FFT and FFTPACK run; only with `--engines` |
+| `pffft-un` | this tree, `pffft_transform` | f32, f64 | as pffft | the spectrum in pffft's internal order: no reordering; only with `--engines` |
 | `pffft@L` | a pffft shared library, `--lib L=PATH`, `pffft_transform_ordered` | those it has | as pffft | what compare.py measures |
 | `fftpack` | `src/fftpack.c` | f32, f64 | any | |
 | `fftw-est`, `fftw-meas` | FFTW 3.3.10 from `FFTW3_ROOT` | f32, f64 | any; `fftw-meas` up to `--fftw-measure-max` (65536) | FFTW_ESTIMATE plans from a cost model, at once, as pffft sets up; FFTW_MEASURE plans by timing candidate algorithms first (about 5 s at n = 262144 on an M2, outside the timing), an advantage no other engine takes |
 | `kissfft` | submodule `kissfft` | f32 | any (real: even) | |
 | `pocketfft` | submodule `pocketfft` | f32, f64 | any | |
 | `green` | submodule `greenffts` | f32 | powers of two | not on Windows, where it crashes |
+| `ooura` | submodule `ooura`, Takuya Ooura's split-radix `fftsg.c` | f32, f64 | powers of two | |
 | `vdsp` | Apple Accelerate | f32, f64 | powers of two | Apple only; f32 from n = 256 or 512 slows the clock while it runs, and is charged for it (see above) |
 | `mkl` | Intel oneMKL | f32, f64 | any | not yet run with bench_fft |
 
@@ -247,6 +256,22 @@ than at home; a Linux VM may expose no cycle counter, and Windows has none
 build_fftw.py uses FFTW's CMake build with MSVC, which has SSE2, AVX and
 AVX2 but no AVX-512 and no NEON: FFTW is left out on Windows ARM64.
 
+`-f compare_args=...` passes options to compare.py, `-f many="a=master
+b=HEAD"` (and `many_args`) runs compare_many.py as well.
+
+A runner label lands on one of several CPUs: ubuntu-26.04 and windows-2025
+on Intel Xeon and AMD EPYC machines of several generations, some of which
+come up once in 30 runs. `benchmarks/ci_dispatch.py` runs the workflow
+until each CPU of a table has done its part: every run gets the table as
+the input `by_cpu`, does the part of the CPU it lands on, and ends after a
+few seconds on any other CPU. Give a CPU everything it should measure in
+one entry (sweep, compares, compare_many); the script's docstring shows the
+table:
+
+```sh
+python3 benchmarks/ci_dispatch.py table.json ci-out --ref my-branch
+```
+
 ## CSV
 
 `bench_fft --csv FILE` writes the results; with `--csv -` they go to stdout
@@ -284,7 +309,7 @@ There is one row per engine, precision (`f32`, `f64`), transform kind
 | `PFFFT_BUILD_BENCHMARKS` | ON if pffft is the top-level project | builds bench_fft, and the mixer and convolution benchmarks in `benchmarks/` |
 | `PFFFT_USE_TYPE_FLOAT`, `PFFFT_USE_TYPE_DOUBLE` | ON | the precisions bench_fft has |
 | `PFFFT_USE_FFTPACK` | ON | `fftpack` |
-| `PFFFT_USE_BENCH_KISS`, `_POCKET`, `_GREEN` | ON | `kissfft`, `pocketfft`, `green`, if the submodule is there (`git submodule update --init`) |
+| `PFFFT_USE_BENCH_KISS`, `_POCKET`, `_GREEN`, `_OOURA` | ON | `kissfft`, `pocketfft`, `green`, `ooura`, if the submodule is there (`git submodule update --init`) |
 | `PFFFT_USE_BENCH_VDSP` | ON (Apple only) | `vdsp` |
 | `PFFFT_USE_BENCH_FFTW` | OFF | `fftw-est`, `fftw-meas`; needs `FFTW3_ROOT`, a prefix made by `build_fftw.py` |
 | `PFFFT_USE_BENCH_MKL` | OFF | `mkl`; MKL's libraries and `<mkl/mkl_dfti.h>` must be on the compiler's paths |
